@@ -1,6 +1,9 @@
 from flask import Flask, request, jsonify, send_file
 import sqlite3, random
 from werkzeug.security import generate_password_hash, check_password_hash
+from flask_socketio import SocketIO, emit, disconnect
+import time
+import eventlet, eventlet.wsgi
 
 app = Flask(__name__)
 
@@ -14,15 +17,41 @@ SMTP_PASSWORD = "dfxu tmaa vapg silr"
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
+
+    # Users table
     c.execute("""CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE,
-            password_hash TEXT,
-            name TEXT,
-            verified INTEGER DEFAULT 0,
-            verification_code TEXT,
-            dob TEXT
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              email TEXT UNIQUE,
+              password_hash TEXT,
+              name TEXT,
+              verified INTEGER DEFAULT 0,
+              verification_code TEXT,
+              dob TEXT,
+              last_online INTEGER,
+              sid TEXT
         )""")
+    
+    # Friend Requests table
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS friend_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sender_email TEXT NOT NULL,
+        receiver_email TEXT NOT NULL,
+        status TEXT DEFAULT 'pending', -- 'pending', 'accepted', 'rejected'
+        timestamp INTEGER
+    )
+    """)
+
+    # Friends table
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS friends (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_email TEXT NOT NULL,
+        friend_email TEXT NOT NULL,
+        since INTEGER,
+        UNIQUE(user_email, friend_email)
+    )
+    """)
     conn.commit()
     conn.close()
 
@@ -162,12 +191,73 @@ def login():
 
     return jsonify(user_data), 200
 
+socketio = SocketIO(app, cors_allowed_origins="*")
+
+# When client connects
+@socketio.on("connect")
+def handle_connect(auth):
+    email = request.args.get("email")
+    if not email:
+        print("❌ No email provided, disconnecting")
+        disconnect()
+        return
+
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("UPDATE users SET sid=? WHERE email=?", (request.sid, email))
+    conn.commit()
+    conn.close()
+
+    print(f"🔗 {email} connected with sid={request.sid}")
+    emit("server_message", {"message": f"Welcome {email}, you are connected!"})
+
+# Heartbeat event
+@socketio.on("heartbeat")
+def handle_heartbeat():
+    print(f"Heartbeat received")
+    sid = request.sid
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT email FROM users WHERE sid=?", (sid,))
+    row = c.fetchone()
+    conn.close()
+
+    if not row:
+        print("❌ Heartbeat from unknown sid")
+        disconnect()
+        return
+
+    email = row[0]
+    timestamp = int(time.time())  # seconds since 1970
+    
+    if email:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("UPDATE users SET last_online=? WHERE email=?", (timestamp, email))
+        conn.commit()
+        conn.close()
+        print(f"❤️ Heartbeat from {email} at {timestamp}")
+    
+    emit("server_message", {"message": "Heartbeat ACK"})
+
+# When client disconnects
+@socketio.on("disconnect")
+def handle_disconnect():
+    sid = request.sid
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("UPDATE users SET sid=NULL WHERE sid=?", (sid,))
+    conn.commit()
+    conn.close()
+
+    print(f"❌ User with sid={sid} disconnected")
+
 if __name__ == "__main__":
     init_db()
     # Run Flask with SSL context
-    app.run(
+    socketio.run(
+        app,
         host="0.0.0.0",  # allows access from other devices on local network
         port=5001,
-        debug=True,
-        ssl_context=('server.crt', 'server.key')
+        debug=True
     )
