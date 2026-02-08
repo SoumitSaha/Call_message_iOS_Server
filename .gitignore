@@ -2,3 +2,5 @@ secrets/
 *.json
 .env
 *.tmp
+__pycache__/
+*/__pycache__/
